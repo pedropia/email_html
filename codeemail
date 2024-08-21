@@ -1,0 +1,766 @@
+
+*&------------------------------------------------------------------------*
+*& Program ZMXSD013            - Transação ZMXSD013
+*&------------------------------------------------------------------------*
+*& Log de modificações:                                                   *
+*& Autor                    Data           Texto                          *
+*&------------------------------------------------------------------------*
+*& Masson                  25-05-2022    Versão Inicial                   *
+*&------------------------------------------------------------------------*
+REPORT zmxsd013 NO STANDARD PAGE HEADING MESSAGE-ID zmsg .
+INCLUDE zmxsd012_status.
+DATA tb_bdc        TYPE STANDARD TABLE OF bdcdata.
+
+TYPES: BEGIN OF  ty_vbrp,
+       fkdat    TYPE fkdat,
+       kunag    TYPE kunag,
+       kunrg    TYPE kunrg,
+       vbeln    TYPE vbrk-vbeln,
+       werks    TYPE vbrp-werks, " consider centro como se fosse cabeçalho
+       spart    TYPE vbrp-spart,
+       posnr    TYPE vbrp-posnr,
+       matnr    TYPE vbrp-matnr,
+       netwr    TYPE vbrp-netwr,
+       mwsbp    TYPE vbrp-mwsbp,
+       END OF ty_vbrp.
+
+TYPES: BEGIN OF  ty_dados,
+         vbeln    TYPE zmxsd_fatura_nc-vbeln     ,
+         vbelv    TYPE zmxsd_fatura_nc-vbelv     ,
+         vbeln_nc TYPE zmxsd_fatura_nc-vbelv     ,
+         cliente  TYPE c LENGTH 70,
+         categ_nc TYPE zmxsd_fatura_nc-categ_nc  ,
+         status   TYPE zmxsd_fatura_nc-status    ,
+         coddesc  TYPE zmxsd_fatura_nc-coddesc   ,
+         valor    TYPE zmxsd_fatura_nc-valor     ,
+         mensa    TYPE c LENGTH 200,
+         status_desc TYPE c LENGTH 60,
+         END OF ty_dados.
+
+
+TYPES: BEGIN OF  ty_zmxsd_fatura_nc,
+        vbeln     TYPE zmxsd_fatura_nc-vbeln     ,
+        vbelv     TYPE zmxsd_fatura_nc-vbelv     ,
+        vbeln_nc  TYPE zmxsd_fatura_nc-vbeln_nc  ,
+        categ_nc  TYPE zmxsd_fatura_nc-categ_nc  ,
+        coddesc   TYPE zmxsd_fatura_nc-coddesc   ,
+        valor     TYPE zmxsd_fatura_nc-valor     ,
+        status    TYPE zmxsd_fatura_nc-status    ,
+         kunnr    TYPE vbak-kunnr,
+         lifsk    TYPE lifsk  ,
+         faksk    TYPE faksk  ,
+         abgru    TYPE vbap-abgru,
+         END OF ty_zmxsd_fatura_nc.
+
+
+TYPES: BEGIN OF  ty_kna1,
+       kunnr    TYPE kna1-kunnr,
+       name1    TYPE kna1-name1,
+       END OF ty_kna1.
+
+
+TYPES: BEGIN OF  ty_vbfa,
+       vbelv    TYPE vbfa-vbelv,
+       vbeln    TYPE vbfa-vbeln,
+       END OF ty_vbfa.
+
+DATA tb_dados TYPE STANDARD TABLE OF ty_dados.
+DATA tb_zmxsd_fatura_nc TYPE STANDARD TABLE OF ty_zmxsd_fatura_nc WITH HEADER LINE.
+DATA tb_vbfa            TYPE STANDARD TABLE OF ty_vbfa               WITH HEADER LINE.
+DATA tb_kna1            TYPE SORTED TABLE OF  ty_kna1  WITH UNIQUE key kunnr   WITH HEADER LINE.
+
+* tabelas
+DATA: tb_fieldcat   TYPE slis_t_fieldcat_alv,
+      tb_top_of_page  TYPE slis_t_listheader.
+
+
+
+DATA wa_zmxsd_fatura_nc TYPE zmxsd_fatura_nc.
+DATA wa_vbak            TYPE vbak.
+DATA wa_vbap            TYPE vbap.
+DATA wa_options TYPE ctu_params.
+
+CONSTANTS gc_font TYPE i VALUE '12'.
+DATA wa_adr6 TYPE adr6.
+DATA: tb_html                TYPE TABLE OF solisti1.
+DATA  wa_html                TYPE solisti1.
+
+
+
+SELECTION-SCREEN BEGIN OF BLOCK 0 WITH FRAME TITLE text-001.
+PARAMETERS : p_vkorg  TYPE vbak-vkorg OBLIGATORY MEMORY ID vko .
+SELECT-OPTIONS : s_vbeln  FOR wa_zmxsd_fatura_nc-vbeln.
+SELECT-OPTIONS : s_vbelv  FOR wa_zmxsd_fatura_nc-vbelv.
+SELECT-OPTIONS : s_erdat  FOR wa_vbak-erdat.
+SELECT-OPTIONS : s_kunnr  FOR wa_vbak-kunnr.
+SELECT-OPTIONS : s_werks  FOR wa_vbap-werks.
+
+SELECTION-SCREEN END OF BLOCK 0.
+SELECTION-SCREEN BEGIN OF BLOCK 1 WITH FRAME TITLE text-002.
+PARAMETERS: p_teste       AS    CHECKBOX  DEFAULT 'X'.
+PARAMETERS: p_repro       AS    CHECKBOX .
+SELECT-OPTIONS: p_email     FOR wa_adr6-smtp_addr NO INTERVALS.
+
+SELECTION-SCREEN END OF BLOCK 1.
+
+
+INITIALIZATION.
+  PERFORM layout.
+
+START-OF-SELECTION.
+  PERFORM cabec.
+  PERFORM le_dados.
+  PERFORM processa_dados.
+  PERFORM envia_email.
+  PERFORM grava_dados.
+
+*---------------------------------------------------------------------
+END-OF-SELECTION.
+
+  PERFORM exibe_relatorio.
+
+*&---------------------------------------------------------------------*
+*&      Form  LE_DADOS_BASICOS
+*&---------------------------------------------------------------------*
+FORM le_dados .
+  DATA: lr_status TYPE RANGE OF zmxsd_fatura_nc-status.
+  DATA lv_status   LIKE LINE OF  lr_status.
+
+  IF s_erdat[] IS INITIAL AND sy-batch = 'X'.
+    s_erdat-option = 'BT'.
+    s_erdat-sign   = 'I'.
+    s_erdat-low    = sy-datlo - 5.
+    s_erdat-high   = sy-datlo.
+*   se o periodo selecionado cair em mes distinto ajusta para começar sempre
+* no mesmo mês.
+    IF s_erdat-low+4(2) NE s_erdat-high+4(2).
+      MOVE s_erdat-high+4(2) TO s_erdat-low+4(2).
+      MOVE '01'              TO s_erdat-low+6(2).
+    ENDIF.
+    APPEND s_erdat.
+  ENDIF.
+
+  MOVE 'IEQ' TO lv_status.
+  MOVE gc_status_pc  TO lv_status-low.APPEND lv_status TO lr_status.
+  IF p_repro EQ 'X'.
+    MOVE gc_status_ef  TO lv_status-low.APPEND lv_status TO lr_status. "erro no BI
+    MOVE gc_status_bl  TO lv_status-low.APPEND lv_status TO lr_status."pedido bloqueado
+    MOVE gc_status_ca  TO lv_status-low.APPEND lv_status TO lr_status."pedido cancelado
+  ENDIF.
+  SELECT DISTINCT zmxsd_fatura_nc~vbeln
+                  zmxsd_fatura_nc~vbelv
+                  zmxsd_fatura_nc~vbeln_nc
+                  zmxsd_fatura_nc~categ_nc
+                  zmxsd_fatura_nc~coddesc
+                  zmxsd_fatura_nc~valor
+                  zmxsd_fatura_nc~status
+                  vbak~kunnr
+                  vbak~lifsk
+                  vbak~faksk
+                  vbap~abgru
+    INTO TABLE tb_zmxsd_fatura_nc FROM zmxsd_fatura_nc
+    INNER JOIN vbak
+    ON vbak~vbeln EQ zmxsd_fatura_nc~vbelv
+    INNER JOIN vbap
+    ON vbap~vbeln EQ zmxsd_fatura_nc~vbelv
+      WHERE zmxsd_fatura_nc~vbeln IN s_vbeln
+        AND zmxsd_fatura_nc~vbelv IN s_vbelv
+        AND vbak~kunnr            IN s_kunnr
+        AND vbak~erdat            IN s_erdat
+        AND vbak~vkorg            EQ p_vkorg
+        AND vbap~werks            IN s_werks
+        AND zmxsd_fatura_nc~status IN lr_status.
+
+
+
+  IF tb_zmxsd_fatura_nc[] IS NOT INITIAL.
+    SELECT DISTINCT vbfa~vbelv   vbfa~vbeln
+      INTO TABLE tb_vbfa FROM vbfa
+      INNER JOIN vbrk
+      ON vbrk~vbeln EQ vbfa~vbeln
+      FOR ALL ENTRIES IN tb_zmxsd_fatura_nc
+      WHERE vbelv EQ tb_zmxsd_fatura_nc-vbelv
+        AND vbtyp_n EQ 'O' "Nota de credito
+        AND vbrk~fksto   NE 'X'.
+
+      SELECT kunnr name1
+        FROM kna1
+        into   TABLE tb_kna1
+      FOR ALL ENTRIES IN tb_zmxsd_fatura_nc
+      WHERE kunnr EQ tb_zmxsd_fatura_nc-kunnr.
+  ENDIF.
+
+
+ENDFORM.                    " LE_DADOS_BASICOS
+*&---------------------------------------------------------------------*
+*&      Form  PROCESSA_DADOS
+*&---------------------------------------------------------------------*
+FORM processa_dados .
+
+
+  DATA lv_dados TYPE ty_dados.
+  DATA lv_texto       TYPE string.
+  DATA     lt_billing_data_in     TYPE STANDARD TABLE OF  bapivbrk  WITH HEADER LINE.
+  DATA     lt_condition_data_in   TYPE STANDARD TABLE OF  bapikomv.
+  DATA     lt_returnlog_out       TYPE  STANDARD TABLE OF bapireturn1 WITH HEADER LINE.
+  DATA     lt_ccard_data_in       TYPE STANDARD TABLE OF bapiccard_vf.
+
+
+  MOVE 'N'    TO wa_options-dismode.
+  MOVE 'S'    TO wa_options-updmode.
+  MOVE 'X'    TO wa_options-defsize.
+  MOVE ' '    TO wa_options-nobinpt.
+*
+  SORT tb_vbfa BY vbelv.
+  LOOP AT tb_zmxsd_fatura_nc.
+    CLEAR lv_dados.
+
+* verifica se ja teve  faturamento manual, se sim atualiza a tabela de controle apenas e nem exibe no relatório
+    clear tb_kna1.
+    READ TABLE tb_kna1 WITH  KEY kunnr = tb_zmxsd_fatura_nc-kunnr BINARY SEARCH.
+    CONCATENATE tb_kna1-kunnr tb_kna1-name1 into lv_dados-cliente SEPARATED BY ' - '.
+    READ TABLE tb_vbfa WITH  KEY vbelv = tb_zmxsd_fatura_nc-vbelv BINARY SEARCH.
+    IF sy-subrc EQ 0.
+      MOVE  tb_vbfa-vbeln TO tb_zmxsd_fatura_nc-vbeln_nc.
+      MOVE gc_status_ok TO tb_zmxsd_fatura_nc-status.
+      MODIFY tb_zmxsd_fatura_nc.
+      MOVE 'Factura se creó manualmente - tabla de control actualizada!' TO lv_dados-mensa.
+    ELSEIF tb_zmxsd_fatura_nc-abgru IS NOT INITIAL .
+      MOVE gc_status_ca TO tb_zmxsd_fatura_nc-status.
+    ELSEIF tb_zmxsd_fatura_nc-lifsk IS NOT INITIAL   OR tb_zmxsd_fatura_nc-faksk IS NOT INITIAL.
+      MOVE gc_status_bl TO tb_zmxsd_fatura_nc-status.
+    ELSE.
+      PERFORM cria_fatura USING tb_zmxsd_fatura_nc-vbelv CHANGING tb_zmxsd_fatura_nc-vbeln_nc
+                                                                  tb_zmxsd_fatura_nc-status
+                                                                  lv_dados-mensa.
+    ENDIF.
+*****
+    MODIFY tb_zmxsd_fatura_nc.
+*****
+    MOVE tb_zmxsd_fatura_nc-vbeln         TO lv_dados-vbeln                  .
+    MOVE tb_zmxsd_fatura_nc-vbelv         TO lv_dados-vbelv                  .
+    MOVE tb_zmxsd_fatura_nc-vbeln_nc      TO lv_dados-vbeln_nc               .
+    MOVE tb_zmxsd_fatura_nc-categ_nc      TO lv_dados-categ_nc               .
+    MOVE tb_zmxsd_fatura_nc-status        TO lv_dados-status                 .
+    MOVE tb_zmxsd_fatura_nc-coddesc       TO lv_dados-coddesc                .
+    MOVE tb_zmxsd_fatura_nc-valor         TO lv_dados-valor                  .
+
+    cl_reca_ddic_doma=>get_text_by_value( EXPORTING  id_name     = 'ZZSTATUS_NC'
+                                                 id_value    = lv_dados-status
+                                                 id_langu    = sy-langu
+                                          IMPORTING
+                                             ed_text = lv_texto
+                                          EXCEPTIONS not_found = 1
+                                             OTHERS    = 2 ).
+
+    CONCATENATE lv_dados-status lv_texto INTO lv_dados-status_desc SEPARATED BY ' - '.
+    APPEND lv_dados TO tb_dados.
+  ENDLOOP.
+*
+ENDFORM.                    " PROCESSA_DADOS
+
+*&---------------------------------------------------------------------*
+*&      Form  FIELDCAT
+*&---------------------------------------------------------------------*
+FORM fieldcat  USING
+                            value(pv_fieldname)  TYPE dd03p-fieldname
+                            value(pv_text)       TYPE dd03p-reptext
+                            value(pv_tabname)    TYPE dd03p-tabname
+                            value(pv_reftab)    TYPE dd03p-tabname
+                            value(pv_decimals_out)   TYPE char1
+                            value(pv_hotspot)    TYPE char1.
+
+  DATA: lf_fieldcat TYPE slis_fieldcat_alv.
+  DATA: lv_outlen   TYPE lvc_outlen.
+
+
+  IF NOT pv_text IS INITIAL.
+    MOVE pv_text TO lf_fieldcat-reptext_ddic.
+  ENDIF.
+
+
+  lf_fieldcat-decimals_out      =  pv_decimals_out.
+  lf_fieldcat-outputlen     = lv_outlen.
+  lf_fieldcat-fieldname     = pv_fieldname.
+  lf_fieldcat-ref_tabname   = pv_reftab.
+  lf_fieldcat-tabname       = pv_tabname.
+  lf_fieldcat-hotspot       = pv_hotspot.
+  lf_fieldcat-qtabname      = pv_tabname.
+
+  APPEND lf_fieldcat TO tb_fieldcat.
+  CLEAR lf_fieldcat.
+
+ENDFORM.                    " FIELDCAT
+
+*-----------------------------------------------------------------------
+*       Form  TOP_OF_PAGE
+*-----------------------------------------------------------------------
+FORM top_of_page.                                           "#EC CALLED
+
+* To Write in Top of the Page
+  CALL FUNCTION 'REUSE_ALV_COMMENTARY_WRITE'
+    EXPORTING
+      it_list_commentary = tb_top_of_page.
+
+ENDFORM.                   "F_TOP_OF_PAGE
+
+
+*&---------------------------------------------------------------------*
+*&      Form  CABEC
+*&---------------------------------------------------------------------*
+FORM cabec.
+
+  DATA: lf_line TYPE slis_listheader.
+  DATA lv_data TYPE c LENGTH 10.
+  DATA lv_hora TYPE c LENGTH 10.
+  DATA lv_tvkot TYPE tvkot.
+
+  CLEAR tb_top_of_page.
+
+  CLEAR lf_line.
+  lf_line-typ  = 'H'.
+  MOVE  sy-title TO   lf_line-info .
+  APPEND lf_line TO tb_top_of_page.
+
+  SELECT SINGLE * FROM tvkot INTO lv_tvkot WHERE spras EQ sy-langu AND  vkorg EQ p_vkorg.
+  CONCATENATE p_vkorg lv_tvkot-vtext INTO  lf_line-info SEPARATED BY ' - '.
+  lf_line-typ  = 'S'.
+  lf_line-key = 'Org.Ventas'.
+  MOVE  lv_tvkot-vtext TO   lf_line-info .
+  APPEND lf_line TO tb_top_of_page.
+
+  WRITE sy-datlo TO lv_data.
+  WRITE sy-timlo TO lv_hora.
+
+  CLEAR lf_line.
+  lf_line-typ  = 'S'.
+  lf_line-key = 'Fecha - Hora'.
+  CONCATENATE lv_data lv_hora INTO lf_line-info SEPARATED BY ' - '.
+  APPEND lf_line TO tb_top_of_page.
+
+  IF p_teste EQ 'X'.
+    CLEAR lf_line.
+    lf_line-typ  = 'S'.
+    lf_line-key = '**Ejecution prueba**'.
+    APPEND lf_line TO tb_top_of_page.
+  ENDIF.
+
+ENDFORM.                    " CABEC
+*&---------------------------------------------------------------------*
+*&      Form  SHOW_ALV
+*&---------------------------------------------------------------------*
+FORM exibe_relatorio.
+  DATA lv_alvlayout     TYPE slis_layout_alv.
+  IF tb_dados[] IS  INITIAL.
+    RETURN.
+  ENDIF.
+
+
+  lv_alvlayout-zebra               = 'X'.
+  lv_alvlayout-colwidth_optimize   = 'X'.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_callback_program      = sy-repid
+      is_layout               = lv_alvlayout
+      it_fieldcat             = tb_fieldcat
+      i_callback_top_of_page  = slis_ev_top_of_page
+      i_callback_user_command = slis_ev_user_command
+      i_save                  = 'A'
+    TABLES
+      t_outtab                = tb_dados.
+
+
+
+
+ENDFORM.                    " SHOW_ALV
+*&---------------------------------------------------------------------*
+*&      Form  SELECIONA_LAYOUT
+*&---------------------------------------------------------------------*
+FORM layout .
+*
+  CLEAR tb_fieldcat[].
+
+** sempre no layout
+  PERFORM fieldcat USING:
+   'VBELN            ' 'Fatura original    '  ' '  ' '                 ' '  'X'  ,
+   'VBELV            ' 'Pedido NC          '  ' '  ' '                 ' '  'X'  ,
+   'VBELN_NC         ' 'Fatura NC          '  ' '  ' '                 ' '  'X'  ,
+   'CLIENTE          ' 'Cliente            '  ' '  ' '                 ' '  ' '  ,
+   'CATEG_NC         ' '                   '  ' '  'ZMXSD_FATURA_NC'   ' '  ' '  ,
+   'STATUS_DESC      ' 'Status             '  ' '  ' '                 ' '  ' '  ,
+   'MENSA            ' 'Msg error          '  ' '  ' '                 ' '  ' '  .
+
+ENDFORM.                    " SELECIONA_LAYOUT
+*&---------------------------------------------------------------------*
+*&      Form  INICIALIZA
+*&---------------------------------------------------------------------*
+FORM inicializa .
+
+ENDFORM.                    " INICIALIZA
+
+*&---------------------------------------------------------------------*
+*&      Form  user_command
+*&---------------------------------------------------------------------*
+FORM user_command USING pv_ucomm    TYPE sy-ucomm
+                        pf_selfield TYPE slis_selfield.     "#EC CALLED
+  CASE pv_ucomm.
+    WHEN zty_dclick.
+      CASE   pf_selfield-fieldname(5).
+        WHEN zty_vbeln.
+          SET PARAMETER ID zty_vf FIELD pf_selfield-value.
+          CALL TRANSACTION zty_vf03 AND SKIP FIRST SCREEN.
+        WHEN 'VBELV'.
+          SET PARAMETER ID zty_aun FIELD pf_selfield-value.
+          CALL TRANSACTION zty_va03 AND SKIP FIRST SCREEN.
+        WHEN OTHERS.
+      ENDCASE.
+      pf_selfield-col_stable =  'X'.
+      pf_selfield-row_stable =  'X'.
+      pf_selfield-refresh = 'X'.  " refresh ALV list !!
+  ENDCASE.
+
+
+ENDFORM.                    " F_USER_COMMAND
+
+*&---------------------------------------------------------------------*
+*&      Form  GRAVA_DADOS
+*&---------------------------------------------------------------------*
+FORM grava_dados .
+  DATA lt_zmxsd_fatura_nc TYPE STANDARD TABLE OF zmxsd_fatura_nc WITH HEADER LINE.
+
+  IF p_teste EQ 'X'.
+    RETURN.
+  ENDIF.
+
+  LOOP AT tb_zmxsd_fatura_nc.
+    MOVE-CORRESPONDING tb_zmxsd_fatura_nc TO lt_zmxsd_fatura_nc.
+    APPEND lt_zmxsd_fatura_nc.
+  ENDLOOP.
+
+  MODIFY zmxsd_fatura_nc FROM TABLE lt_zmxsd_fatura_nc.
+
+
+ENDFORM.                    " GRAVA_DADOS
+*&---------------------------------------------------------------------*
+*&      Form  INSERT_LINE
+*&---------------------------------------------------------------------*
+FORM preenche_bdcdata USING pi_start TYPE c
+                            pi_name   TYPE c
+                            pi_value TYPE any.
+
+  DATA  lv_bdc          TYPE bdcdata.
+  MOVE pi_start TO lv_bdc-dynbegin.
+  IF pi_start IS NOT INITIAL.
+    MOVE: pi_name  TO lv_bdc-program,
+          pi_value TO lv_bdc-dynpro.
+  ELSE.
+    MOVE: pi_name  TO lv_bdc-fnam,
+          pi_value TO lv_bdc-fval.
+  ENDIF.
+  APPEND lv_bdc TO tb_bdc.
+
+ENDFORM.                               " INSERT_LINE
+*&---------------------------------------------------------------------*
+*&      Form  CRIA_FATURA
+*&---------------------------------------------------------------------*
+
+FORM cria_fatura  USING    pi_vbelv
+                  CHANGING po_vbeln_nc
+                           po_status
+                           po_mensa.
+  DATA lt_messtab TYPE STANDARD TABLE OF bdcmsgcoll.
+  DATA lv_messtab TYPE  bdcmsgcoll.
+
+  FREE:  tb_bdc.
+  CLEAR: po_vbeln_nc,
+         po_status,
+         po_mensa.
+
+  PERFORM preenche_bdcdata USING:
+   'X' 'SAPMV60A'             '0102',
+   ' ' 'BDC_OKCODE'           '/00',
+   ' ' 'KOMFK-VBELN(01)'      pi_vbelv,
+   'X' 'SAPMV60A'             '0104'.
+
+  IF p_teste EQ 'X'.
+    PERFORM preenche_bdcdata USING:
+        ' ' 'BDC_OKCODE'           '/EBABA'.
+  ELSE.
+    PERFORM preenche_bdcdata USING:
+       ' ' 'BDC_OKCODE'           '=SICH'.
+  ENDIF.
+  CALL TRANSACTION 'VF01'   USING  tb_bdc
+                            OPTIONS FROM wa_options
+                            MESSAGES INTO lt_messtab.
+  IF p_teste IS INITIAL.
+    READ TABLE lt_messtab INTO lv_messtab WITH KEY msgid = 'VF'
+                                                   msgnr  = '311'.
+  ENDIF.
+  IF sy-subrc EQ 0.
+    MOVE lv_messtab-msgv1 TO po_vbeln_nc.
+    MOVE gc_status_ok TO po_status.
+  ELSE.
+    LOOP AT  lt_messtab INTO lv_messtab .
+    ENDLOOP.
+    IF sy-subrc EQ 0.
+      MESSAGE ID lv_messtab-msgid TYPE lv_messtab-msgtyp
+                           NUMBER lv_messtab-msgnr
+                           WITH lv_messtab-msgv1 lv_messtab-msgv2 lv_messtab-msgv3 lv_messtab-msgv4
+                           INTO po_mensa.
+    ELSE.
+      MOVE 'error al crear factura sin mensaje' TO  po_mensa.
+    ENDIF.
+    MOVE gc_status_ef TO po_status.
+  ENDIF.
+ENDFORM.                    " CRIA_FATURA
+*&---------------------------------------------------------------------*
+*&      Form  ENVIA_EMAIL
+*&---------------------------------------------------------------------*
+FORM envia_email .
+
+  DATA lt_dados TYPE STANDARD TABLE OF ty_dados.
+  DATA lv_dados TYPE ty_dados.
+
+  IF p_email[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  MOVE tb_dados TO lt_dados.
+  DELETE lt_dados WHERE status EQ 'OK'.
+  SORT lt_dados BY vbeln .
+
+  LOOP AT lt_dados INTO lv_dados.
+
+    AT FIRST.
+      PERFORM inicializa_html.
+      PERFORM cab_html.
+    ENDAT.
+
+    APPEND  '<TR>'                                           TO tb_html.
+    PERFORM celula_tab USING lv_dados-vbeln          'LEFT '  '12' 'normal' 'rgb(220, 220, 220)'.
+    PERFORM celula_tab USING lv_dados-vbelv          'LEFT '  '12' 'normal' 'rgb(220, 220, 220)'.
+    PERFORM celula_tab USING lv_dados-categ_nc       'LEFT '  '12' 'normal' 'rgb(220, 220, 220)'.
+    PERFORM celula_tab USING lv_dados-status_desc    'LEFT '  '12' 'normal' 'rgb(220, 220, 220)'.
+    PERFORM celula_tab USING lv_dados-mensa          'LEFT '  '12' 'normal' 'rgb(220, 220, 220)'.
+    APPEND  '</TR>'                                           TO tb_html.
+    AT LAST.
+      PERFORM finaliza_html.
+      PERFORM envia_email_html.
+    ENDAT.
+
+  ENDLOOP.
+
+ENDFORM.                    " ENVIA_EMAIL
+*&---------------------------------------------------------------------*
+*&      Form  INICIALIZA_HTML
+*&---------------------------------------------------------------------*
+FORM inicializa_html .
+
+  wa_html-line = '<html>'.
+  append wa_html to tb_html.
+
+*Set the Body background colour
+  wa_html-line = '<body bgcolor = "#FAFAFA">'.
+  APPEND wa_html TO tb_html.
+  CLEAR wa_html.
+
+*Set font color and its type
+  wa_html-line = '<FONT COLOR = "#191970" face="Garamond">'.
+  APPEND wa_html TO tb_html.  CLEAR wa_html.
+
+  MOVE sy-title TO wa_html.
+
+  PERFORM write_simple_line USING  wa_html           gc_font    'BOLD'.
+  APPEND '           <br/>                               ' TO tb_html.
+  APPEND '           <br/>                               ' TO tb_html.
+ENDFORM.                    " INICIALIZA_HTML
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_SIMPLE_LINE
+*&---------------------------------------------------------------------*
+FORM write_simple_line  USING   pi_texto TYPE any
+                                pi_fonte TYPE any
+                                pi_estilo TYPE any.
+
+  APPEND '<span style="font-weight:                   '  TO tb_html.
+  APPEND pi_estilo                                       TO tb_html.
+  APPEND ';font-size:  '                                 TO tb_html.
+  APPEND pi_fonte                                        TO tb_html.
+  APPEND '">        '                                    TO tb_html.
+  APPEND pi_texto                                        TO tb_html.
+  APPEND '    </span>                                  ' TO tb_html.
+
+
+ENDFORM.                    " WRITE_SIMPLE_LINE
+*&---------------------------------------------------------------------*
+*&      Form  CAB_HTML
+*&---------------------------------------------------------------------*
+FORM cab_html .
+
+*  Definicao Tabela
+  APPEND         '<TABLE  width= "100%" border="0"> <TR>' TO tb_html.
+* Cabecalho Tabela
+
+  APPEND  '<TR>'                                           TO tb_html.
+  PERFORM celula_tab USING 'Fatura original                    ' 'Center ' '12' 'bold' 'rgb(153, 204, 255)'.
+  PERFORM celula_tab USING 'Pedido NC                          ' 'Center ' '12' 'bold' 'rgb(153, 204, 255)'.
+  PERFORM celula_tab USING 'Categoria de desconto NC/ND        ' 'Center ' '12' 'bold' 'rgb(153, 204, 255)'.
+  PERFORM celula_tab USING 'Status                             ' 'Center ' '12' 'bold' 'rgb(153, 204, 255)'.
+  PERFORM celula_tab USING 'Msg error                          ' 'Center ' '12' 'bold' 'rgb(153, 204, 255)'.
+  APPEND  '</TR>'                                           TO tb_html.
+*
+
+ENDFORM.                    " CAB_HTML
+*&---------------------------------------------------------------------*
+*&      Form  FINALIZA_HTML
+*&---------------------------------------------------------------------*
+FORM finaliza_html .
+  APPEND  '</table>'                                  TO tb_html.
+  APPEND '           <br/>                               ' TO tb_html.
+
+  PERFORM write_simple_line USING 'Mensaje automático. ¡Por favor no responda!' gc_font    'normal'.
+  APPEND '</body></html>'    TO tb_html.
+
+
+ENDFORM.                    " FINALIZA_HTML
+*&---------------------------------------------------------------------*
+*&      Form  ENVIA_EMAIL_HTML
+*&---------------------------------------------------------------------*
+FORM envia_email_html .
+  DATA lv_cnt TYPE i.
+  DATA lv_data  TYPE c LENGTH 12.
+  DATA lv_sub                 TYPE so_obj_des.
+  DATA: lv_rec                 LIKE adr6-smtp_addr,
+        lv_message(100)        TYPE c,
+        lv_subject             TYPE string,
+        lv_recipient           TYPE REF TO cl_cam_address_bcs,
+        lv_send_request        TYPE REF TO cl_bcs,
+        lv_document            TYPE REF TO cl_document_bcs,
+        lv_sender              TYPE REF TO if_sender_bcs,
+        lv_bcs_exception       TYPE REF TO cx_document_bcs,
+        lv_send_exception      TYPE REF TO cx_send_req_bcs,
+        lv_addr_exception      TYPE REF TO cx_address_bcs.
+
+
+
+  DESCRIBE TABLE tb_html LINES lv_cnt.
+  IF lv_cnt IS INITIAL.
+    RETURN.
+  ENDIF.
+
+
+  WRITE  sy-datum TO lv_data.
+  CONCATENATE sy-title  lv_data INTO lv_sub SEPARATED BY ' -  '.
+
+  LOOP AT p_email.
+* Creates persistent send request
+    TRY.
+        lv_send_request = cl_bcs=>create_persistent( ).
+
+* Creating Document
+        IF tb_html[] IS NOT INITIAL.
+          lv_document = cl_document_bcs=>create_document(
+                                      i_type       = 'HTM'
+                                      i_importance = '5'
+                                      i_text       = tb_html
+                                      i_language   = sy-langu
+                                      i_subject    = lv_sub ).
+        ENDIF.
+
+* Subject of the mail
+        MOVE lv_sub TO lv_subject.
+
+        TRY.
+* Set the Message Subject
+            CALL METHOD lv_send_request->set_message_subject
+              EXPORTING
+                ip_subject = lv_subject.
+          CATCH cx_sy_dyn_call_illegal_method.
+        ENDTRY.
+
+* Add document to send request
+        CALL METHOD lv_send_request->set_document( lv_document ).
+
+* Do send delivery info for successful mails
+        CALL METHOD lv_send_request->set_status_attributes
+          EXPORTING
+            i_requested_status = 'E'
+            i_status_mail      = 'A'.
+
+* Set Sender
+        lv_sender = cl_sapuser_bcs=>create( sy-uname ).
+        CALL METHOD lv_send_request->set_sender
+          EXPORTING
+            i_sender = lv_sender.
+
+* Set Receivers
+        lv_rec = p_email-low.
+        lv_recipient =
+               cl_cam_address_bcs=>create_internet_address( lv_rec ).
+
+        CALL METHOD lv_send_request->add_recipient
+          EXPORTING
+            i_recipient  = lv_recipient
+            i_copy       = ' '
+            i_blind_copy = ' '
+            i_no_forward = ' '
+            i_express    = 'X'.
+
+* Send the email
+        CALL METHOD lv_send_request->send(
+          EXPORTING
+            i_with_error_screen = 'X' ).
+*          RECEIVING
+*            result              = lv_result ).
+      CATCH cx_document_bcs INTO lv_bcs_exception.
+        lv_message = lv_bcs_exception->get_text( ).
+        MESSAGE lv_message TYPE 'S'.
+
+      CATCH cx_send_req_bcs INTO lv_send_exception.
+        lv_message = lv_send_exception->get_text( ).
+        MESSAGE lv_message TYPE 'S'.
+
+      CATCH cx_address_bcs INTO lv_addr_exception.
+        lv_message = lv_addr_exception->get_text( ).
+        MESSAGE lv_message TYPE 'S'.
+    ENDTRY.
+    MESSAGE i090 WITH 'E-mail enviado para ' p_email-low.
+    COMMIT WORK.
+  ENDLOOP.
+
+
+  CLEAR tb_html[].
+ENDFORM.                    " ENVIA_EMAIL_HTML
+*&---------------------------------------------------------------------*
+*&      Form  CELULA_TAB
+*&---------------------------------------------------------------------*
+FORM celula_tab  USING    pi_text  TYPE any
+                          pi_align TYPE any
+                          pi_font   TYPE any
+                          pi_weight  TYPE any
+                          pi_rgb   TYPE any.
+
+  APPEND ' <td                   '                         TO tb_html.
+  APPEND ' style="'                                        TO tb_html.
+  APPEND ' text-align:'                                    TO tb_html.
+  APPEND pi_align                                          TO tb_html.
+  APPEND ';'                                               TO tb_html.
+
+  APPEND 'font-size:'                                     TO tb_html.
+  APPEND pi_font                                           TO tb_html.
+  APPEND ';'                                              TO tb_html.
+
+  APPEND ' background-color:'                            TO tb_html.
+  APPEND pi_rgb                                            TO tb_html.
+  APPEND ';'                                              TO tb_html.
+
+  APPEND ' font-weight:'                                   TO tb_html.
+  APPEND pi_weight                                           TO tb_html.
+  APPEND '">'                                              TO tb_html.
+
+
+  APPEND pi_text                                           TO tb_html.
+  APPEND      '</td>'                                      TO tb_html.
+
+
+ENDFORM.                    " CELULA_TAB
